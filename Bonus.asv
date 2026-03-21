@@ -1,0 +1,401 @@
+clear;                  
+clc;                    
+load('tracesbar1.mat');
+
+
+% Density calculation (1 / rho_mix = sum(mass_fraction / rho_component))
+rho_AP = 1950; rho_Al = 2700; rho_HTPB = 920; % kg/m^3
+rho_prop = 1 / ((0.68/rho_AP) + (0.18/rho_Al) + (0.14/rho_HTPB)); % Propellant density (kg/m^3)
+
+% Volume and Mass
+D_out = 0.160; D_in = 0.100; L = 0.290; % meters
+V_prop = (pi/4) * (D_out^2 - D_in^2) * L; % volume in m^3
+M_tot = rho_prop * V_prop; % Total mass in kg
+
+% Throat Areas (A_t) for High, Mid, Low (converted from mm to m)
+At_high = pi * ((21.81 / 1000) / 2)^2;
+At_mid  = pi * ((25.26 / 1000) / 2)^2;
+At_low  = pi * ((28.80 / 1000) / 2)^2;
+At_array = [At_high, At_mid, At_low]; % Array to easily access inside the loop
+
+%%
+
+% --- Configuration ---
+fs = 1000;           % 1 kHz sampling frequency
+dt = 1/fs;           % Time step in seconds
+web_thickness = 30;  % mm (Derived from D_out=160mm, D_in=100mm)
+
+pbar2444(:, [2, 3]) = pbar2444(:, [3, 2]);
+
+% Group our loaded matrices into a cell array to loop through them
+batches = {pbar2438, pbar2439, pbar2440, pbar2441, pbar2442, pbar2443, pbar2444, pbar2445, pbar2446};
+batch_names = {'2438', '2439', '2440', '2441', '2442', '2443', '2444', '2445', '2446'};
+
+% Preallocate cell arrays to store final results
+Peff_results = cell(1, 9);
+rb_results = cell(1, 9);
+cstar_results = cell(1, 9);
+
+for i = 1:length(batches)
+    current_batch = batches{i};
+    
+    % Preallocate arrays for the 3 columns (High, Mid, Low pressures)
+    Peff_batch = zeros(1, 3);
+    rb_batch = zeros(1, 3);
+   
+    for j = 1:3
+        p_trace = current_batch(:, j);
+        
+        % --- 1: Find P_ref ---
+        P_max = max(p_trace);
+        P_thresh = 0.05 * P_max; % 1% threshold for points A and G
+        
+        idx_A = find(p_trace >= P_thresh, 1, 'first'); 
+        idx_G = find(p_trace >= P_thresh, 1, 'last');  
+        
+        t_A = idx_A * dt;
+        t_G = idx_G * dt;
+        
+        % Integrate Pdt from A to G 
+        I1 = trapz(p_trace(idx_A:idx_G)) * dt;
+        
+        % Calculate Reference Pressure (P_ref)
+        P_ref = I1 / (t_G - t_A);
+        
+        % --- Find Effective Values ---
+        % Find indices for points B and E based on P_ref
+    
+        % Find all indices in the entire trace where pressure is BELOW P_ref
+        below_Pref = find(p_trace < P_ref);
+        
+        % We only care about the ignition phase, so isolate the first half of the burn
+        mid_burn = floor((idx_A + idx_G) / 2);
+        ignition_dips = below_Pref(below_Pref < mid_burn);
+        
+        % Point B is the exact index right after the LAST dip below P_ref
+        idx_B = find(p_trace >= P_ref, 1, 'first');
+        idx_E = find(p_trace >= P_ref, 1, 'last');
+        
+        t_B = idx_B * dt;
+        t_E = idx_E * dt;
+        
+        % Calculate effective burning time
+        t_burn = t_E - t_B;
+        
+        % Integrate Pdt from B to E
+        I_eff = trapz(p_trace(idx_B:idx_E)) * dt;
+        
+        % Calculate Effective Pressure (P_eff)
+        P_eff = I_eff / t_burn;
+        
+        % Calculate Burning Rate (rb)
+        r_b = web_thickness / t_burn;
+        
+        % --- 2: Calculate C* ---
+        % Convert effective integral from bar*s to Pa*s
+        I_eff_Pa = I_eff * 1e5; 
+        
+        % Calculate C* for this specific trace
+        c_star = (I_eff_Pa * At_array(j)) / M_tot;
+        
+        % Store the results for this specific trace
+        Peff_batch(j) = P_eff;
+        rb_batch(j) = r_b;
+        cstar_batch(j) = c_star;
+
+    end 
+    
+    % Save the batch results into the main storage
+    Peff_results{i} = Peff_batch;
+    rb_results{i} = rb_batch;
+    cstar_results{i} = cstar_batch;
+    
+    fprintf('Batch %s processed: Peff, rb, and c* calculated.\n', batch_names{i});
+end 
+
+% Flatten the cell arrays into simple 1D arrays (27x1 vectors) for the Uncertainty function
+all_Peff = [Peff_results{:}]'; 
+all_rb = [rb_results{:}]';
+
+disp('All 27 traces processed successfully!');
+
+%%
+% --- 3: Calculate Vieille's Law Parameters ---
+% Pass the 27 pairs of (Effective Pressure, Burning Rate) into the Uncertainty function
+[a, Inc_a, n, Inc_n, R2] = Uncertainty(all_Peff, all_rb);
+
+% Display the results cleanly in the command window
+fprintf('\n--- Vieille''s Law Characterization ---\n');
+fprintf('Coefficient "a": %.4f +/- %.4f\n', a, Inc_a);
+fprintf('Exponent "n":    %.4f +/- %.4f\n', n, Inc_n);
+fprintf('R^2 Value:       %.4f\n', R2);
+fprintf('--------------------------------------\n');
+
+
+% --- Final C* Characterization ---
+all_cstar = [cstar_results{:}]'; % Flatten 27 values
+mean_cstar = mean(all_cstar);
+std_cstar = std(all_cstar); % Standard deviation represents the uncertainty
+
+fprintf('\n--- Characteristic Velocity (C*) ---\n');
+fprintf('Mean C*: %.2f m/s +/- %.2f m/s\n', mean_cstar, std_cstar);
+fprintf('--------------------------------------\n');
+
+
+%%
+
+
+% --- 4: Plotting the Results ---
+
+% Convert the 1x9 cell arrays into 9x3 matrices for easy column extraction
+% Column 1: High, Column 2: Mid, Column 3: Low
+Cstar_matrix = cell2mat(cstar_results'); 
+Peff_matrix  = cell2mat(Peff_results');
+rb_matrix    = cell2mat(rb_results');
+
+% Calculate the individual means for C*
+mean_cstar_high = mean(Cstar_matrix(:, 1));
+mean_cstar_mid  = mean(Cstar_matrix(:, 2));
+mean_cstar_low  = mean(Cstar_matrix(:, 3));
+
+% ---------------------------------------------------------
+% Plot 1: Characteristic Velocity (C*) - HIGH Pressure
+% ---------------------------------------------------------
+figure('Name', 'C* - High Pressure');
+plot(1:9, Cstar_matrix(:, 1), 'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 6); 
+hold on;
+yline(mean_cstar_high, 'r-', 'LineWidth', 2);
+title('Characteristic Velocity (C^*) - High Pressure');
+xlabel('Batch Number');
+ylabel('C^* (m/s)');
+grid on;
+legend('High P Traces', sprintf('Mean: %.1f m/s', mean_cstar_high), 'Location', 'best');
+hold off;
+
+% ---------------------------------------------------------
+% Plot 2: Characteristic Velocity (C*) - MID Pressure
+% ---------------------------------------------------------
+figure('Name', 'C* - Medium Pressure');
+plot(1:9, Cstar_matrix(:, 2), 'go', 'MarkerFaceColor', 'g', 'MarkerSize', 6); 
+hold on;
+yline(mean_cstar_mid, 'g-', 'LineWidth', 2);
+title('Characteristic Velocity (C^*) - Medium Pressure');
+xlabel('Batch Number');
+ylabel('C^* (m/s)');
+grid on;
+legend('Mid P Traces', sprintf('Mean: %.1f m/s', mean_cstar_mid), 'Location', 'best');
+hold off;
+
+% ---------------------------------------------------------
+% Plot 3: Characteristic Velocity (C*) - LOW Pressure
+% ---------------------------------------------------------
+figure('Name', 'C* - Low Pressure');
+plot(1:9, Cstar_matrix(:, 3), 'bo', 'MarkerFaceColor', 'b', 'MarkerSize', 6); 
+hold on;
+yline(mean_cstar_low, 'b-', 'LineWidth', 2);
+title('Characteristic Velocity (C^*) - Low Pressure');
+xlabel('Batch Number');
+ylabel('C^* (m/s)');
+grid on;
+legend('Low P Traces', sprintf('Mean: %.1f m/s', mean_cstar_low), 'Location', 'best');
+hold off;
+
+% ---------------------------------------------------------
+% Plot 4: Burning Rate (r_b) vs Effective Pressure (P_eff)
+% ---------------------------------------------------------
+figure('Name', 'Burning Rate vs Effective Pressure');
+
+% Plot High, Mid, and Low points in different colors on the same log-log graph
+loglog(Peff_matrix(:, 1), rb_matrix(:, 1), 'rs', 'MarkerFaceColor', 'r', 'MarkerSize', 7); hold on;
+loglog(Peff_matrix(:, 2), rb_matrix(:, 2), 'gs', 'MarkerFaceColor', 'g', 'MarkerSize', 7);
+loglog(Peff_matrix(:, 3), rb_matrix(:, 3), 'bs', 'MarkerFaceColor', 'b', 'MarkerSize', 7);
+
+% Generate a smooth line for the theoretical Vieille's Law fit
+% (Using the overall 'a' and 'n' from the Uncertainty function)
+P_fit = linspace(min(all_Peff)*0.9, max(all_Peff)*1.1, 100); 
+rb_fit = a * (P_fit .^ n); 
+
+% Plot the fitted line
+loglog(P_fit, rb_fit, 'k-', 'LineWidth', 2);
+
+% Formatting
+xlabel('Effective Pressure, P_{eff} (bar)');
+ylabel('Burning Rate, r_b (mm/s)');
+title('Vieille''s Law Characterization (Grouped)');
+legend('High Pressure', 'Mid Pressure', 'Low Pressure', ...
+       sprintf('Fit: r_b = %.4f P^{%.4f}', a, n), 'Location', 'northwest');
+grid on;
+hold off;
+
+
+
+% --- PHASE 6: Generic Motor Firing Prediction Model ---
+
+% 1. Model Inputs (Using means from previous phases)
+cstar_mean = mean_cstar; % m/s
+
+% Convert 'a' from (mm/s)/bar^n to standard SI units: (m/s)/Pa^n
+a_SI = (a / 1000) / (1e5)^n; 
+
+% Select Nozzle Throat (Choose one, Medium used here as default)
+%D_t = 21.81 / 1000; % High Pressure (m)
+D_t = 25.26 / 1000; % Medium Pressure (m)
+%D_t = 28.80 / 1000; % Low Pressure (m)
+A_t = (pi/4) * D_t^2;
+
+% 2. Motor Initial Geometry
+D_in = 0.100;      % Internal port diameter (m)
+D_out = 0.160;     % Outer diameter (m)
+L_initial = 0.290; % Initial grain length (m)
+web_max = 0.030;   % Total web thickness to burn (m)
+
+% 3. Simulation Setup
+dt_sim = 0.001;    % 1 ms time step matching experimental data
+t = 0;             
+y = 0;             % Initial web burned distance (m)
+
+% Arrays to store the predicted trace
+time_trace = [];
+pressure_trace = [];
+
+% 4. Time-Marching Simulation
+while y < web_max
+    % Update grain geometry as it burns
+    D_curr = D_in + 2*y;
+    
+    % For a standard BATES motor, the internal bore and both ends burn. 
+    L_curr = L_initial - 2*y; 
+    
+    % Calculate Burning Surface Area (Ab)
+    A_port = pi * D_curr * L_curr;
+    A_ends = 2 * (pi/4) * (D_out^2 - D_curr^2);
+    A_b = A_port + A_ends;
+    
+    % Calculate quasi-steady Chamber Pressure in Pascals
+    P_Pa = (a_SI * rho_prop * cstar_mean * (A_b / A_t)) ^ (1 / (1 - n));
+    
+    % Store time and pressure (converted back to bar for plotting)
+    time_trace(end+1) = t;
+    pressure_trace(end+1) = P_Pa / 1e5;
+    
+    % Calculate current burning rate in m/s
+    rb_current = a_SI * P_Pa^n;
+    
+    % Step forward in time
+    y = y + (rb_current * dt_sim);
+    t = t + dt_sim;
+end
+
+% 5. Plot the Predicted Pressure Trace
+figure('Name', 'Predicted Rocket Motor Firing');
+plot(time_trace, pressure_trace, 'k-', 'LineWidth', 2);
+title(sprintf('Nominal Ballistic Prediction (Throat D_t = %.2f mm)', D_t * 1000));
+xlabel('Time (s)');
+ylabel('Pressure (bar)');
+grid on;
+
+fprintf('\n--- Nominal Ballistic Prediction ---\n');
+fprintf('Simulated Burning Time:     %.3f seconds\n', time_trace(end));
+fprintf('Maximum Predicted Pressure: %.2f bar\n', max(pressure_trace));
+fprintf('------------------------------------\n');
+
+% --- PHASE 7: Monte Carlo Uncertainty Analysis ---
+
+N_mc = 1000; % Number of simulations to run
+
+% Preallocate arrays to store the KPIs
+mc_Pmax = zeros(N_mc, 1);
+mc_tburn = zeros(N_mc, 1);
+
+fprintf('\nStarting Monte Carlo Simulation (%d iterations)...\n', N_mc);
+h = waitbar(0, 'Running Monte Carlo Simulations...'); 
+
+for k = 1:N_mc
+    % 1. Sample inputs with a PHYSICAL REALITY CHECK
+    valid_sample = false;
+    while ~valid_sample
+        a_samp     = a + Inc_a * randn();
+        n_samp     = n + Inc_n * randn();
+        cstar_samp = mean_cstar + std_cstar * randn();
+        
+        % Check if the randomly generated values are physically possible
+        if (a_samp > 0) && (n_samp > 0) && (n_samp < 0.99) && (cstar_samp > 0)
+            valid_sample = true; % Accept the values and exit the while loop
+        end
+    end
+    
+    % Convert sampled 'a' to SI units for this specific run
+    a_SI_samp = (a_samp / 1000) / (1e5)^n_samp; 
+    
+    % 2. Reset initial conditions for this motor firing
+    t_run = 0;             
+    y_run = 0; 
+    P_max_run = 0; 
+    
+    % 3. Time-Marching Simulation 
+    while y_run < web_max
+        D_curr = D_in + 2*y_run;
+        L_curr = L_initial - 2*y_run; 
+        
+        A_port = pi * D_curr * L_curr;
+        A_ends = 2 * (pi/4) * (D_out^2 - D_curr^2);
+        A_b = A_port + A_ends;
+        
+        % Calculate Pressure
+        P_Pa = (a_SI_samp * rho_prop * cstar_samp * (A_b / A_t)) ^ (1 / (1 - n_samp));
+        P_bar = P_Pa / 1e5;
+        
+        if P_bar > P_max_run
+            P_max_run = P_bar;
+        end
+        
+        % Calculate burning rate and step forward
+        rb_current = a_SI_samp * P_Pa^n_samp;
+        y_run = y_run + (rb_current * dt_sim);
+        t_run = t_run + dt_sim;
+    end
+    
+    % 4. Store the final KPIs (using real() as a final safety catch)
+    mc_Pmax(k) = real(P_max_run);
+    mc_tburn(k) = real(t_run);
+    
+    waitbar(k/N_mc, h);
+end
+close(h); 
+
+% --- Calculate Statistical Bounds ---
+mean_Pmax_mc = mean(mc_Pmax);
+std_Pmax_mc  = std(mc_Pmax);
+mean_tburn_mc = mean(mc_tburn);
+std_tburn_mc  = std(mc_tburn);
+
+fprintf('Monte Carlo Complete!\n');
+fprintf('Expected Max Pressure: %.2f bar (3-Sigma Worst Case: %.2f bar)\n', ...
+        mean_Pmax_mc, mean_Pmax_mc + 3*std_Pmax_mc);
+fprintf('Expected Burn Time:    %.3f s   (3-Sigma Spread: +/- %.3f s)\n', ...
+        mean_tburn_mc, 3*std_tburn_mc);
+fprintf('------------------------------------\n');
+
+% --- 5. Plot the Monte Carlo Distributions ---
+figure('Name', 'Monte Carlo Analysis - Motor Variability', 'Position', [100, 100, 1000, 400]);
+
+subplot(1, 2, 1);
+histogram(mc_Pmax, 40, 'FaceColor', [0.85 0.325 0.098], 'EdgeColor', 'k');
+hold on;
+xline(mean_Pmax_mc, 'k-', 'LineWidth', 2);
+xline(mean_Pmax_mc + 3*std_Pmax_mc, 'r--', 'LineWidth', 2); 
+title('Distribution of Maximum Chamber Pressure');
+xlabel('Maximum Pressure (bar)');
+ylabel('Frequency');
+legend('Simulated Data', 'Mean P_{max}', '3\sigma Worst-Case', 'Location', 'best');
+grid on;
+
+subplot(1, 2, 2);
+histogram(mc_tburn, 40, 'FaceColor', [0 0.447 0.741], 'EdgeColor', 'k');
+hold on;
+xline(mean_tburn_mc, 'k-', 'LineWidth', 2);
+title('Distribution of Nominal Burn Time');
+xlabel('Burn Time (s)');
+ylabel('Frequency');
+legend('Simulated Data', 'Mean Burn Time', 'Location', 'best');
+grid on;
