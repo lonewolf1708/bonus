@@ -102,6 +102,7 @@ rb_all     = zeros(N_traces, 1);   % [mm/s]  Burning rate
 tburn_all  = zeros(N_traces, 1);   % [s]     Burning time
 At_all     = zeros(N_traces, 1);   % [m²]    Throat area for this firing
 Ipc_all    = zeros(N_traces, 1);   % [N·s]   Pressure-impulse integral (for c*)
+class_all  = zeros(N_traces, 1);   % [1/2/3] Pressure class: 1=Low, 2=Mid, 3=High
 
 trace_id   = 0;
 
@@ -193,6 +194,7 @@ for b = 1:N_batches
         tburn_all(trace_id) = t_burn;
         At_all(trace_id)    = At_col(c);
         Ipc_all(trace_id)   = Ipc;
+        class_all(trace_id) = find(rank == c, 1);  % 1=Low, 2=Mid, 3=High
     end
 end
 
@@ -234,11 +236,23 @@ fprintf('\n');
 %  SECTION 6: PLOTS
 % =========================================================================
 
-% --- Plot 1: Burning rate vs effective pressure (log-log with Vieille fit) ---
+% --- Plot 1: Burning rate vs effective pressure (log-log), coloured by pressure class ---
+% Class markers and colours
+class_markers = {'o', 's', '^'};             % Low / Mid / High
+class_colours = {[0.2 0.5 1], [0.9 0.5 0], [0.1 0.7 0.1]};  % blue / orange / green
+class_labels  = {'Low pressure (~32 bar)', 'Mid pressure (~48 bar)', 'High pressure (~77 bar)'};
+
 figure(1); clf;
-loglog(p_eff_all, rb_all, 'bo', 'MarkerSize', 7, 'MarkerFaceColor', [0.5 0.7 1], ...
-       'DisplayName', 'Experimental data (27 firings)');
 hold on;
+for cls = 1:3
+    idx_cls = (class_all == cls);
+    loglog(p_eff_all(idx_cls), rb_all(idx_cls), ...
+           class_markers{cls}, ...
+           'Color',           class_colours{cls}, ...
+           'MarkerFaceColor', class_colours{cls}, ...
+           'MarkerSize', 8, ...
+           'DisplayName', class_labels{cls});
+end
 p_fit  = linspace(min(p_eff_all)*0.9, max(p_eff_all)*1.1, 200);
 rb_fit = a * p_fit.^n_exp;
 loglog(p_fit, rb_fit, 'r-', 'LineWidth', 2.5, ...
